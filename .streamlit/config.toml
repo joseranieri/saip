@@ -1,0 +1,12 @@
+# ==============================================================================
+# Configuração de Tema Nativo do Streamlit - SAIP
+# Garante que a aplicação inicie sempre no modo claro com a paleta oficial.
+# ==============================================================================
+
+[theme]
+base = "light"
+primaryColor = "#123B66"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F8FC"
+textColor = "#172B4D"
+font = "sans serif"
