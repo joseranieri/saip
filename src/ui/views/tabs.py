@@ -32,6 +32,21 @@ from src.ui.components import (
     show_dataframe,
 )
 
+def _apply_responsive_legend(fig, bottom_margin: int = 95):
+    """Posiciona a legenda horizontalmente abaixo do gráfico para melhor leitura no mobile."""
+    fig.update_layout(
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.22,
+            xanchor="center",
+            x=0.5,
+            title_text="",
+        ),
+        margin=dict(l=20, r=20, t=55, b=bottom_margin),
+    )
+    return fig
+
 
 def _classify_macro_eixo(codigo_saeb: str, eixo_saeb: str = "") -> str:
     """Agrupa códigos SAEB nos 4 Macro-Eixos Cognitivos para comparação temporal."""
@@ -61,6 +76,7 @@ def _classify_macro_eixo(codigo_saeb: str, eixo_saeb: str = "") -> str:
         return "2. Gêneros e Estrutura Composicional"
 
     return "Outros Indicadores"
+
 
 def _build_skill_summary(df: pd.DataFrame, simulado_num: int | None = None) -> pd.DataFrame:
     """Calcula aproveitamento e metadados SAEB/BNCC das colunas numéricas."""
@@ -161,7 +177,7 @@ def render_temporal_analysis(default_year: int = 2026) -> None:
     if not datasets:
         st.info(
             f"Nenhum simulado foi salvo na base local para o ano de {selected_year}. "
-            "Envie um arquivo CSV na seção acima para iniciar a série temporal."
+            "Acesse Carga de Dados no menu lateral para enviar um arquivo CSV."
         )
         return
 
@@ -187,7 +203,6 @@ def render_temporal_analysis(default_year: int = 2026) -> None:
         if skill_summary.empty:
             continue
 
-        # Prioriza as habilidades mapeadas; usa todas as numéricas apenas se nenhuma for mapeada
         mapped = skill_summary[skill_summary["Código SAEB"] != "Não mapeado"]
         eval_basis = mapped if not mapped.empty else skill_summary
 
@@ -294,8 +309,26 @@ def render_temporal_analysis(default_year: int = 2026) -> None:
             "para manter comparabilidade contínua entre edições."
         )
         macro_df = pd.DataFrame(macro_rows).sort_values("Ordem")
+
+        # Cria grade completa (todos os simulados importados x todos os Macro-Eixos)
+        # para manter o eixo X fixo mesmo ao isolar um eixo na legenda do Plotly
+        simulados_ordenados = [
+            f"{num}º Simulado" for num in sorted(macro_df["Ordem"].unique())
+        ]
+        eixos_ordenados = sorted(macro_df["Macro-Eixo"].unique())
+        grade_completa = pd.MultiIndex.from_product(
+            [simulados_ordenados, eixos_ordenados],
+            names=["Simulado", "Macro-Eixo"],
+        ).to_frame(index=False)
+
+        macro_plot_df = grade_completa.merge(
+            macro_df[["Simulado", "Macro-Eixo", "Aproveitamento (%)"]],
+            on=["Simulado", "Macro-Eixo"],
+            how="left",
+        )
+
         fig_macro = px.line(
-            macro_df,
+            macro_plot_df,
             x="Simulado",
             y="Aproveitamento (%)",
             color="Macro-Eixo",
@@ -303,8 +336,14 @@ def render_temporal_analysis(default_year: int = 2026) -> None:
             title="Desempenho por Macro-Eixo ao Longo dos Simulados",
             template="plotly_white",
             range_y=[0, 100],
+            category_orders={
+                "Simulado": simulados_ordenados,
+                "Macro-Eixo": eixos_ordenados,
+            },
         )
-        fig_macro.update_traces(line=dict(width=2.5))
+        fig_macro.update_traces(line=dict(width=2.5), connectgaps=False)
+        fig_macro.update_xaxes(type="category")
+        _apply_responsive_legend(fig_macro, bottom_margin=115)
         st.plotly_chart(fig_macro, use_container_width=True)
 
     if skill_rows:
@@ -316,13 +355,33 @@ def render_temporal_analysis(default_year: int = 2026) -> None:
         recorrentes = sorted(counts[counts >= 2].index.tolist())
         todas = sorted(counts.index.tolist())
 
-        opcoes_habilidades = recorrentes if recorrentes else todas
-        selecionadas = st.multiselect(
+        # Mapeia cada código SAEB para sua descrição oficial
+        desc_por_codigo = (
+            skills_temp_df.drop_duplicates("Código SAEB")
+            .set_index("Código SAEB")["Descrição"]
+            .to_dict()
+        )
+
+        # Opções da lista suspensa incluem código + descrição;
+        # a tag selecionada exibe apenas o código curto (ex.: 9L2.6)
+        opcoes_formatadas = [
+            f"{cod} — {desc_por_codigo.get(cod, '')}" for cod in todas
+        ]
+        default_codes = recorrentes[:5] if recorrentes else todas[:5]
+        default_formatadas = [
+            f"{cod} — {desc_por_codigo.get(cod, '')}" for cod in default_codes
+        ]
+
+        selecionadas_raw = st.multiselect(
             "Selecione os códigos SAEB para comparar ao longo das edições",
-            options=todas,
-            default=opcoes_habilidades[:5],
+            options=opcoes_formatadas,
+            default=default_formatadas,
+            format_func=lambda item: item.split(" — ", 1)[0],
+            help="Clique na caixa para pesquisar pelo código ou pela descrição da habilidade.",
             key="temporal_saeb_codes",
         )
+
+        selecionadas = [item.split(" — ", 1)[0] for item in selecionadas_raw]
 
         if selecionadas:
             filtered_skills = skills_temp_df[
@@ -339,6 +398,7 @@ def render_temporal_analysis(default_year: int = 2026) -> None:
                 template="plotly_white",
                 range_y=[0, 100],
             )
+            _apply_responsive_legend(fig_saeb, bottom_margin=110)
             st.plotly_chart(fig_saeb, use_container_width=True)
 
             pivot_saeb = (
@@ -362,17 +422,6 @@ def render_skill_analysis(df: pd.DataFrame, simulado_num: int | None = None) -> 
     )
 
     summary = _build_skill_summary(df, simulado_num=simulado_num)
-    catalog_df = get_skills_catalog_df()
-
-def render_skill_analysis(df: pd.DataFrame, simulado_num: int | None = None) -> None:
-    """Aba 3: Análise Pedagógica por Habilidades (SAEB / BNCC)."""
-    st.subheader("Análise Pedagógica por Habilidades (SAEB / BNCC)")
-    edicao_txt = f"{simulado_num}º Simulado SAEB" if simulado_num else "Simulados SAEB"
-    st.caption(
-        f"Matriz de referência: Língua Portuguesa — 8º Ano ({edicao_txt} — SEMEC Teresina)."
-    )
-
-    summary = _build_skill_summary(df)
     catalog_df = get_skills_catalog_df()
 
     if not summary.empty:
@@ -460,6 +509,7 @@ def render_skill_analysis(df: pd.DataFrame, simulado_num: int | None = None) -> 
             legend_title="Classificação Pedagógica",
             height=max(380, len(summary) * 45),
         )
+        _apply_responsive_legend(fig, bottom_margin=100)
         st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("Detalhamento Estatístico e Pedagógico")

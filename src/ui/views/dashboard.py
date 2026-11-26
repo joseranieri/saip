@@ -1,9 +1,8 @@
 """
-Módulo de Visualização: Painel Principal (Dashboard).
+Módulo de Visualização: Carga de Dados e Dashboard Analítico.
 
-Gerencia a importação simplificada de arquivos CSV por edição do simulado
-(1º ao 8º), anonimização automática (remoção de nomes/identificadores),
-gravação obrigatória no banco local e exibição das abas analíticas.
+Separa a interface de envio/importação de CSV (render_upload_page)
+da interface de análise pedagógica e temporal (render_dashboard_page).
 """
 
 import re
@@ -17,7 +16,7 @@ from src.analyzer import (
     detect_identifier_columns,
     read_csv_safely,
 )
-from src.database import save_dataset
+from src.database import get_datasets_by_year, save_dataset
 from src.ui.components import sanitize_dataframe_columns, show_dataframe
 from src.ui.styles import show_logo
 from src.ui.views.tabs import (
@@ -35,7 +34,6 @@ SIMULADOS_OPCOES = {
     i: f"{i}º Simulado SAEB" for i in range(1, 9)
 }
 
-# Padrões adicionais para garantir que nenhuma coluna de nome/identificação seja exibida ou salva
 EXTRA_NAME_PATTERNS = re.compile(
     r"(?:^|_|\b)(nome|aluno|estudante|discente|candidato|matricula|matrícula|cpf|rg|ra|inep|id_aluno)(?:_|\b|$)",
     re.IGNORECASE,
@@ -50,116 +48,132 @@ def _remove_student_identifiers(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=cols_to_drop, errors="ignore")
 
 
-def render_dashboard_page(logo_path: Path) -> None:
-    """Renderiza a página principal do Painel de Inteligência Pedagógica."""
-    show_logo(logo_path, width=210)
-
-    st.title("Painel de Inteligência Pedagógica")
+def render_upload_page(logo_path: Path) -> None:
+    """Renderiza a tela dedicada exclusivamente à Carga de Dados (1º ao 8º Simulado)."""
+    
+    st.title("Carga de Dados")
     st.caption(
-        "Selecione a edição do simulado (1º ao 8º), envie o arquivo CSV e "
-        "acompanhe os indicadores e a evolução temporal das turmas."
+        "Selecione a edição do simulado (1º ao 8º), envie o arquivo CSV para "
+        "anonimização automática e gravação na base de dados local."
     )
 
     st.divider()
 
-    # Fluxo direto de envio por edição do simulado (sem seleção manual de colunas)
-    with st.expander("Enviar resultado de Simulado (1º ao 8º)", expanded=True):
-        c_sim, c_ano = st.columns([1.5, 1])
+    c_sim, c_ano = st.columns([1.5, 1])
 
-        with c_sim:
-            simulado_num = st.selectbox(
-                "Qual simulado você está enviando?",
-                options=list(SIMULADOS_OPCOES.keys()),
-                format_func=lambda k: SIMULADOS_OPCOES[k],
-                key="upload_simulado_num",
-            )
-
-        with c_ano:
-            ano_letivo = st.number_input(
-                "Ano Letivo",
-                min_value=2020,
-                max_value=2035,
-                value=datetime.now().year,
-                step=1,
-                key="upload_ano_letivo",
-            )
-
-        uploaded = st.file_uploader(
-            f"Selecione o arquivo CSV do {simulado_num}º Simulado SAEB ({int(ano_letivo)})",
-            type=["csv"],
-            key="csv_upload",
+    with c_sim:
+        simulado_num = st.selectbox(
+            "Qual simulado você está enviando?",
+            options=list(SIMULADOS_OPCOES.keys()),
+            format_func=lambda k: SIMULADOS_OPCOES[k],
+            key="upload_simulado_num",
         )
 
-        if uploaded is not None:
-            if st.button(
-                f"Processar e salvar {simulado_num}º Simulado",
-                type="primary",
-                use_container_width=True,
-            ):
-                try:
-                    raw_df = read_csv_safely(uploaded)
-                    clean_df = sanitize_dataframe_columns(raw_df)
+    with c_ano:
+        ano_letivo = st.number_input(
+            "Ano Letivo",
+            min_value=2020,
+            max_value=2035,
+            value=datetime.now().year,
+            step=1,
+            key="upload_ano_letivo",
+        )
 
-                    # Remove automaticamente qualquer coluna de nome/identificação dos alunos
-                    analysis_df = _remove_student_identifiers(clean_df)
+    uploaded = st.file_uploader(
+        f"Selecione o arquivo CSV do {simulado_num}º Simulado SAEB ({int(ano_letivo)})",
+        type=["csv"],
+        key="csv_upload",
+    )
 
-                    if analysis_df.empty:
-                        st.error("Não existem colunas válidas disponíveis para análise.")
-                    else:
-                        dataset_name = f"{simulado_num}º Simulado SAEB/{int(ano_letivo)}"
+    if uploaded is not None:
+        if st.button(
+            f"Processar e salvar {simulado_num}º Simulado",
+            type="primary",
+            use_container_width=True,
+        ):
+            try:
+                raw_df = read_csv_safely(uploaded)
+                clean_df = sanitize_dataframe_columns(raw_df)
+                analysis_df = _remove_student_identifiers(clean_df)
 
-                        # Injeta metadados temporais na base tratada
-                        analysis_df = analysis_df.copy()
-                        analysis_df["Simulado"] = f"{simulado_num}º Simulado"
-                        analysis_df["Ordem_Simulado"] = int(simulado_num)
-                        analysis_df["Ano_Letivo"] = int(ano_letivo)
+                if analysis_df.empty:
+                    st.error("Não existem colunas válidas disponíveis para análise.")
+                else:
+                    dataset_name = f"{simulado_num}º Simulado SAEB/{int(ano_letivo)}"
 
-                        metrics = analyze_dataframe(analysis_df)
+                    analysis_df = analysis_df.copy()
+                    analysis_df["Simulado"] = f"{simulado_num}º Simulado"
+                    analysis_df["Ordem_Simulado"] = int(simulado_num)
+                    analysis_df["Ano_Letivo"] = int(ano_letivo)
 
-                        st.session_state.current_df = analysis_df
-                        st.session_state.current_metrics = metrics
-                        st.session_state.current_name = dataset_name
-                        st.session_state.current_simulado_num = int(simulado_num)
-                        st.session_state.current_ano_letivo = int(ano_letivo)
+                    metrics = analyze_dataframe(analysis_df)
 
-                        # Gravação obrigatória na base de dados local
-                        records = (
-                            analysis_df
-                            .astype(object)
-                            .where(pd.notna(analysis_df), None)
-                            .to_dict(orient="records")
-                        )
+                    st.session_state.current_df = analysis_df
+                    st.session_state.current_metrics = metrics
+                    st.session_state.current_name = dataset_name
+                    st.session_state.current_simulado_num = int(simulado_num)
+                    st.session_state.current_ano_letivo = int(ano_letivo)
 
-                        save_dataset(
-                            name=dataset_name,
-                            original_filename=uploaded.name,
-                            row_count=len(analysis_df),
-                            column_names=list(analysis_df.columns),
-                            records=records,
-                            metrics=metrics,
-                            username=st.session_state.username,
-                            simulado_num=int(simulado_num),
-                            ano_letivo=int(ano_letivo),
-                        )
+                    records = (
+                        analysis_df
+                        .astype(object)
+                        .where(pd.notna(analysis_df), None)
+                        .to_dict(orient="records")
+                    )
 
-                        st.success(
-                            f"{dataset_name} processado ({len(analysis_df):,} registros anonimizados) "
-                            "e salvo na base de dados local com sucesso!"
-                        )
+                    save_dataset(
+                        name=dataset_name,
+                        original_filename=uploaded.name,
+                        row_count=len(analysis_df),
+                        column_names=list(analysis_df.columns),
+                        records=records,
+                        metrics=metrics,
+                        username=st.session_state.username,
+                        simulado_num=int(simulado_num),
+                        ano_letivo=int(ano_letivo),
+                    )
 
-                except Exception as exc:
-                    st.error(f"Erro ao processar o arquivo: {exc}")
+                    st.success(
+                        f"{dataset_name} processado ({len(analysis_df):,} registros anonimizados) "
+                        "e salvo na base local! Acesse o menu **Dashboard** para visualizar os gráficos."
+                    )
 
-    # Exibição dos resultados e da análise temporal
+            except Exception as exc:
+                st.error(f"Erro ao processar o arquivo: {exc}")
+
+    # Resumo rápido das edições já carregadas no ano selecionado
+    st.divider()
+    st.subheader(f"Status das Importações — {int(ano_letivo)}")
+    datasets_ano = get_datasets_by_year(int(ano_letivo))
+    loaded_nums = {int(d.get("simulado_num", 1)) for d in datasets_ano}
+
+    cols = st.columns(8)
+    for idx in range(1, 9):
+        with cols[idx - 1]:
+            if idx in loaded_nums:
+                st.success(f"**{idx}º Sim.**\n\nSalvo")
+            else:
+                st.warning(f"**{idx}º Sim.**\n\nPendente")
+
+
+def render_dashboard_page(logo_path: Path) -> None:
+    """Renderiza exclusivamente o Painel Analítico (Dashboard)."""
+    
+
+    st.title("Dashboard — Inteligência Pedagógica")
+    st.caption(
+        "Explore indicadores, desempenho por habilidade SAEB/BNCC e a evolução "
+        "temporal dos simulados."
+    )
+
+    st.divider()
+
     has_current = (
         "current_df" in st.session_state
         and "current_metrics" in st.session_state
     )
 
-    st.divider()
-
     if has_current:
-        # Garante proteção contra nomes também ao carregar bases antigas do histórico
         df = _remove_student_identifiers(
             sanitize_dataframe_columns(st.session_state.current_df)
         )
@@ -167,7 +181,7 @@ def render_dashboard_page(logo_path: Path) -> None:
         sim_atual = st.session_state.get("current_simulado_num", 1)
         ano_atual = st.session_state.get("current_ano_letivo", datetime.now().year)
 
-        st.subheader(f"Resultados da análise: {st.session_state.current_name}")
+        st.subheader(f"Resultados em análise: {st.session_state.current_name}")
 
         tabs = st.tabs([
             "Visão Geral",
@@ -206,7 +220,8 @@ def render_dashboard_page(logo_path: Path) -> None:
 
     else:
         st.info(
-            "Selecione o simulado acima, envie o CSV e clique em processar, "
-            "ou consulte abaixo a evolução temporal dos simulados já salvos."
+            "Nenhum simulado selecionado para análise individual no momento. "
+            "Use **Carga de Dados** para enviar um arquivo ou **Histórico de Importações** "
+            "para carregar uma edição salva. Abaixo está a série temporal consolidada:"
         )
         render_temporal_analysis(default_year=datetime.now().year)

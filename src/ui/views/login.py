@@ -1,24 +1,28 @@
 """
-Módulo de Visualização: Autenticação e Gestão de Senha.
+Módulo de Visualização: Autenticação, Alteração e Reset de Senha.
 
-Contém a tela de login centralizada e o formulário de alteração de senha.
+Contém a tela de login centralizada, o formulário de alteração de senha
+e a tela de reset para a senha padrão do sistema.
 """
 
 from pathlib import Path
 import streamlit as st
 
-from src.auth import authenticate, change_password, reset_default_password
+from src.auth import (
+    DEFAULT_USERNAME,
+    authenticate,
+    change_password,
+    reset_default_password,
+)
 
 
 def render_login_screen(logo_path: Path) -> None:
     """Renderiza a tela inicial de autenticação do sistema SAIP."""
     st.markdown("<br><br>", unsafe_allow_html=True)
 
-    # Colunas para centralização horizontal do card de login
     _, center, _ = st.columns([1, 1.2, 1])
 
     with center:
-        # Centralização da logo dentro do bloco central
         _, logo_center, _ = st.columns([1, 2, 1])
 
         with logo_center:
@@ -31,7 +35,7 @@ def render_login_screen(logo_path: Path) -> None:
                         <h1 style="color:#123B66;">SAIP</h1>
                     </div>
                     """,
-                    unsafe_allow_html=True
+                    unsafe_allow_html=True,
                 )
 
         st.markdown(
@@ -45,22 +49,22 @@ def render_login_screen(logo_path: Path) -> None:
                 </p>
             </div>
             """,
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
 
         with st.form("login_form"):
             username = st.text_input(
                 "Usuário",
-                placeholder="Digite seu usuário"
+                placeholder="Digite seu usuário",
             )
             password = st.text_input(
                 "Senha",
                 type="password",
-                placeholder="Digite sua senha"
+                placeholder="Digite sua senha",
             )
             submitted = st.form_submit_button(
                 "Entrar",
-                use_container_width=True
+                use_container_width=True,
             )
 
         if submitted:
@@ -75,21 +79,19 @@ def render_login_screen(logo_path: Path) -> None:
                 st.rerun()
             else:
                 st.error("Usuário ou senha inválidos.")
-        if st.button("Resetar senha padrão (admin)", use_container_width=True):
-            senha_padrao = reset_default_password("admin")
-            st.info(f"Senha do usuário 'admin' restaurada para: `{senha_padrao}`")
 
 
 def render_change_password_page() -> None:
     """Renderiza a página para alteração da senha do usuário autenticado."""
-    st.title("Alterar senha")
+    st.title("Alterar Senha")
+    st.caption("Atualize sua senha de acesso ao sistema.")
 
     with st.form("change_password"):
         current = st.text_input("Senha atual", type="password")
         new = st.text_input("Nova senha", type="password")
         confirm = st.text_input(
             "Confirme a nova senha",
-            type="password"
+            type="password",
         )
         submit = st.form_submit_button("Salvar nova senha")
 
@@ -103,3 +105,42 @@ def render_change_password_page() -> None:
             st.success("Senha alterada com sucesso!")
         else:
             st.error("A senha atual está incorreta.")
+
+
+def render_reset_password_page() -> None:
+    """Renderiza a página para restaurar a senha de um usuário para a senha padrão."""
+    st.title("Resetar Senha")
+    st.caption(
+        "Restaura a senha de acesso para a senha padrão configurada no sistema "
+        "e exige a definição de uma nova senha no próximo login."
+    )
+
+    current_user = st.session_state.get("username", DEFAULT_USERNAME)
+
+    with st.form("reset_password_form"):
+        target_user = st.text_input(
+            "Usuário para reset",
+            value=current_user,
+            help="Informe o nome de usuário cuja senha será restaurada para o padrão.",
+        )
+        confirm_reset = st.checkbox(
+            "Confirmo que desejo redefinir a senha deste usuário para a senha padrão."
+        )
+        submitted = st.form_submit_button(
+            "Resetar para senha padrão",
+            type="primary",
+        )
+
+    if submitted:
+        if not target_user.strip():
+            st.error("Informe um nome de usuário válido.")
+        elif not confirm_reset:
+            st.warning("Marque a caixa de confirmação antes de prosseguir.")
+        else:
+            default_pwd = reset_default_password(target_user.strip())
+            if target_user.strip() == current_user:
+                st.session_state.must_change_password = True
+            st.success(
+                f"Senha do usuário **{target_user.strip()}** restaurada com sucesso "
+                f"para a senha padrão: `{default_pwd}`"
+            )

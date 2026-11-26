@@ -1,9 +1,9 @@
 """
 SAIP — Sistema de Análise Estatística e Inteligência Pedagógica.
 
-Arquivo principal (ponto de entrada) da aplicação Streamlit.
-Responsável apenas pela configuração inicial da página, aplicação da identidade
-visual, controle de sessão/autenticação e roteamento entre as telas.
+Ponto de entrada da aplicação Streamlit com menu lateral segmentado:
+Dashboard, Carga de Dados, Histórico de Importações, Alterar Senha,
+Resetar Senha e Sair.
 """
 
 from pathlib import Path
@@ -13,9 +13,16 @@ import streamlit as st
 from src.auth import ensure_default_user
 from src.database import init_db
 from src.ui.styles import apply_custom_styles, show_logo
-from src.ui.views.dashboard import render_dashboard_page
+from src.ui.views.dashboard import (
+    render_dashboard_page,
+    render_upload_page,
+)
 from src.ui.views.history import render_history_page
-from src.ui.views.login import render_change_password_page, render_login_screen
+from src.ui.views.login import (
+    render_change_password_page,
+    render_login_screen,
+    render_reset_password_page,
+)
 
 
 # ==============================================================================
@@ -28,17 +35,14 @@ st.set_page_config(
     page_title="SAIP | Inteligência Pedagógica",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 LOGO_PATH = BASE_DIR / "assets" / "logo.png"
 
-# Inicializa as tabelas do SQLite e garante a existência do usuário padrão
 init_db()
 ensure_default_user()
-
-# Aplica o CSS customizado da identidade visual do SAIP
 apply_custom_styles()
 
 
@@ -69,10 +73,12 @@ with st.sidebar:
         "Navegação",
         [
             "Dashboard",
-            "Histórico de importações",
-            "Alterar senha"
+            "Carga de Dados",
+            "Histórico de Importações",
+            "Alterar Senha",
+            "Resetar Senha",
         ],
-        label_visibility="collapsed"
+        label_visibility="collapsed",
     )
 
     st.divider()
@@ -85,7 +91,7 @@ with st.sidebar:
 # Obriga a troca da senha inicial antes de liberar o acesso às demais telas
 if (
     st.session_state.get("must_change_password")
-    and page != "Alterar senha"
+    and page not in ("Alterar Senha", "Resetar Senha")
 ):
     st.warning("Altere sua senha inicial antes de continuar.")
     st.stop()
@@ -95,11 +101,17 @@ if (
 # 4. ROTEAMENTO DAS PÁGINAS
 # ==============================================================================
 
-if page == "Alterar senha":
-    render_change_password_page()
-
-elif page == "Dashboard":
+if page == "Dashboard":
     render_dashboard_page(LOGO_PATH)
 
-elif page == "Histórico de importações":
+elif page == "Carga de Dados":
+    render_upload_page(LOGO_PATH)
+
+elif page == "Histórico de Importações":
     render_history_page()
+
+elif page == "Alterar Senha":
+    render_change_password_page()
+
+elif page == "Resetar Senha":
+    render_reset_password_page()
