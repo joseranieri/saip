@@ -1,13 +1,14 @@
 """
 Módulo de Visualização: Abas Analíticas do Dashboard.
 
-Contém a implementação isolada de cada uma das 6 abas de análise do SAIP:
-  1. Visão Geral
-  2. Estatísticas (Numéricas e Categóricas)
-  3. Turmas e Grupos
-  4. Habilidades (Matriz SAEB / BNCC)
-  5. Qualidade dos Dados
-  6. Relatórios e Exportação
+Contém a implementação completa de todas as abas de análise do SAIP:
+  1. Visão Geral (render_overview)
+  2. Evolução Temporal 1º ao 8º Simulado (render_temporal_analysis)
+  3. Habilidades SAEB / BNCC (render_skill_analysis)
+  4. Estatísticas Numéricas e Categóricas (render_descriptive_analysis, render_categorical_analysis)
+  5. Turmas e Grupos (render_group_analysis)
+  6. Qualidade dos Dados (render_quality_analysis)
+  7. Relatórios e Exportação (render_report)
 """
 
 import json
@@ -15,6 +16,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from src.database import get_datasets_by_year, list_datasets
 from src.skills_catalog import (
     DTYPE_LABELS_PT,
     METRIC_LABELS_PT,
@@ -29,6 +31,79 @@ from src.ui.components import (
     sanitize_dataframe_columns,
     show_dataframe,
 )
+
+
+def _classify_macro_eixo(codigo_saeb: str, eixo_saeb: str = "") -> str:
+    """Agrupa códigos SAEB nos 4 Macro-Eixos Cognitivos para comparação temporal."""
+    code = str(codigo_saeb).strip().upper()
+    eixo = str(eixo_saeb).strip().lower()
+
+    if code.startswith(("5AL", "9AL")):
+        return "4. Análise Linguística e Coesão"
+
+    if any(
+        code.startswith(prefix)
+        for prefix in ("5L1.1", "5L1.2", "9L1.2.I", "9L1.2.D", "9L1.3.G", "9L1.3.I")
+    ) or "localizar informação" in eixo or "ideia central" in eixo:
+        return "1. Compreensão e Localização Textual"
+
+    if any(
+        code.startswith(prefix)
+        for prefix in (
+            "5L2.6", "5L2.7", "5L2.8", "5L3.1",
+            "9L2.3", "9L2.6", "9L2.7", "9L2.9",
+            "9L1.1.C", "9L1.4",
+        )
+    ) or "inferir" in eixo or "fatos de opiniões" in eixo or "persuasivos" in eixo:
+        return "3. Inferência, Semântica e Senso Crítico"
+
+    if code.startswith(("5L", "9L")):
+        return "2. Gêneros e Estrutura Composicional"
+
+    return "Outros Indicadores"
+
+def _build_skill_summary(df: pd.DataFrame, simulado_num: int | None = None) -> pd.DataFrame:
+    """Calcula aproveitamento e metadados SAEB/BNCC das colunas numéricas."""
+    ignore_meta_cols = {"Simulado", "Ordem_Simulado", "Ano_Letivo"}
+    eval_df = df.drop(columns=[c for c in ignore_meta_cols if c in df.columns])
+    numeric_columns = get_numeric_columns(eval_df)
+
+    rows = []
+    for col in numeric_columns:
+        matched = match_column_to_skill(col, preferred_simulado_num=simulado_num)
+        mean_val = float(eval_df[col].mean())
+
+        max_val = float(eval_df[col].max()) if eval_df[col].notna().any() else 100.0
+        if max_val <= 1.0:
+            pct_val = round(mean_val * 100, 2)
+        elif max_val <= 10.0:
+            pct_val = round(mean_val * 10, 2)
+        else:
+            pct_val = round(mean_val, 2)
+
+        codigo_saeb = matched["codigo_saeb"] if matched else "Não mapeado"
+        eixo_saeb = matched["eixo_saeb"] if matched else "—"
+
+        rows.append({
+            "Coluna no Arquivo": col,
+            "Código SAEB": codigo_saeb,
+            "Código BNCC": matched["codigo_bncc"] if matched else "—",
+            "Macro-Eixo": _classify_macro_eixo(codigo_saeb, eixo_saeb),
+            "Descrição da Habilidade": (
+                matched["descricao_bncc"]
+                if matched
+                else "Coluna numérica sem vínculo automático com código SAEB/BNCC."
+            ),
+            "Eixo SAEB": eixo_saeb,
+            "Média Bruta": round(mean_val, 2),
+            "Aproveitamento (%)": pct_val,
+            "Mediana": round(float(eval_df[col].median()), 2),
+            "Desvio Padrão": round(float(eval_df[col].std()), 2) if len(eval_df) > 1 else 0.0,
+            "Registros Válidos": int(eval_df[col].count()),
+            "Nível Pedagógico": classify_proficiency(pct_val),
+        })
+
+    return pd.DataFrame(rows)
 
 
 def render_overview(df: pd.DataFrame, metrics: dict) -> None:
@@ -56,205 +131,252 @@ def render_overview(df: pd.DataFrame, metrics: dict) -> None:
     c2.metric("Variáveis categóricas", categorical_count)
 
 
-def render_descriptive_analysis(df: pd.DataFrame, metrics: dict) -> None:
-    """Aba 2 (Parte 1): Estatísticas descritivas, histograma e diagrama de caixa."""
-    numeric = metrics.get("numeric", {})
-    numeric_columns = list(numeric.keys())
-
-    if not numeric_columns:
-        st.info("Não foram encontradas variáveis numéricas.")
-        return
-
-    st.subheader("Estatísticas descritivas")
-
-    numeric_table = pd.DataFrame(numeric).T
-    numeric_table = numeric_table.rename(
-        columns=lambda col: METRIC_LABELS_PT.get(str(col).strip().lower(), col)
-    )
-    show_dataframe(numeric_table.reset_index(names="Variável"))
-
-    selected = st.selectbox(
-        "Selecione uma variável numérica",
-        numeric_columns,
-        key="descriptive_variable"
-    )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        fig = px.histogram(
-            df,
-            x=selected,
-            marginal="box",
-            title=f"Distribuição de {selected}",
-            labels={selected: selected, "count": "Frequência"},
-            template="plotly_white",
-            color_discrete_sequence=["#123B66"]
-        )
-        fig.update_layout(autosize=True, yaxis_title="Frequência")
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        fig = px.box(
-            df,
-            y=selected,
-            title=f"Diagrama de caixa de {selected}",
-            labels={selected: selected},
-            template="plotly_white",
-            color_discrete_sequence=["#123B66"]
-        )
-        fig.update_layout(autosize=True)
-        st.plotly_chart(fig, use_container_width=True)
-
-
-def render_categorical_analysis(df: pd.DataFrame) -> None:
-    """Aba 2 (Parte 2): Tabela de frequência e gráfico de barras para variáveis categóricas."""
-    categorical_columns = get_categorical_columns(df)
-
-    if not categorical_columns:
-        st.info("Não foram encontradas variáveis categóricas.")
-        return
-
-    selected = st.selectbox(
-        "Selecione uma variável categórica",
-        categorical_columns,
-        key="categorical_variable"
-    )
-
-    frequency = (
-        df[selected]
-        .fillna("(Ausente)")
-        .astype(str)
-        .value_counts()
-        .head(20)
-        .rename_axis("Categoria")
-        .reset_index(name="Frequência")
-    )
-
-    col1, col2 = st.columns([1, 1.5])
-
-    with col1:
-        show_dataframe(frequency)
-
-    with col2:
-        fig = px.bar(
-            frequency,
-            x="Categoria",
-            y="Frequência",
-            title=f"Frequência de {selected}",
-            template="plotly_white",
-            color_discrete_sequence=["#123B66"]
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-
-def render_group_analysis(df: pd.DataFrame) -> None:
-    """Aba 3: Comparação de indicadores numéricos agrupados por turma, escola ou categoria."""
-    columns = get_categorical_columns(df)
-    numeric_columns = get_numeric_columns(df)
-
-    if not columns or not numeric_columns:
-        st.info(
-            "Esta análise exige pelo menos uma variável categórica "
-            "e uma variável numérica."
-        )
-        return
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        group_column = st.selectbox(
-            "Agrupar por",
-            columns,
-            key="group_column"
-        )
-
-    with c2:
-        value_column = st.selectbox(
-            "Indicador numérico",
-            numeric_columns,
-            key="group_value"
-        )
-
-    grouped = (
-        df.groupby(group_column, dropna=False)[value_column]
-        .agg(
-            Quantidade="count",
-            Média="mean",
-            Mediana="median",
-            **{"Desvio padrão": "std"},
-            Mínimo="min",
-            Máximo="max"
-        )
-        .reset_index()
-        .rename(columns={group_column: "Grupo"})
-    )
-
-    show_dataframe(grouped)
-
-    fig = px.bar(
-        grouped,
-        x="Grupo",
-        y="Média",
-        title=f"Média de {value_column} por {group_column}",
-        template="plotly_white",
-        color_discrete_sequence=["#123B66"]
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def render_skill_analysis(df: pd.DataFrame) -> None:
+def render_temporal_analysis(default_year: int = 2026) -> None:
     """
-    Aba 4: Análise Pedagógica por Habilidades (SAEB / BNCC).
-    Cruza os indicadores do CSV com a matriz oficial de Língua Portuguesa (8º Ano)
-    e disponibiliza o catálogo completo para consulta e filtro.
+    Aba 2: Evolução Temporal (1º ao 8º Simulado).
+    Consolida todas as edições salvas do ano letivo e exibe cobertura,
+    variação entre edições (Δ p.p.), Macro-Eixos e códigos SAEB pareados.
     """
-    st.subheader("Análise Pedagógica por Habilidades (SAEB / BNCC)")
+    st.subheader("Evolução Temporal dos Simulados (Ciclo Anual de 8 Avaliações)")
     st.caption(
-        "Matriz de referência: Língua Portuguesa — 8º Ano "
-        "(1º Simulado SAEB/2026 — SEMEC Teresina)."
+        "Acompanhe a progressão pedagógica do 1º ao 8º Simulado por média geral, "
+        "Macro-Eixos Cognitivos e habilidades recorrentes."
     )
 
-    numeric_columns = get_numeric_columns(df)
+    all_items = list_datasets()
+    available_years = sorted(
+        {int(item.get("ano_letivo", default_year)) for item in all_items} | {int(default_year)},
+        reverse=True,
+    )
+
+    selected_year = st.selectbox(
+        "Ano Letivo de Referência",
+        options=available_years,
+        index=0,
+        key="temporal_year_selector",
+    )
+
+    datasets = get_datasets_by_year(selected_year)
+
+    if not datasets:
+        st.info(
+            f"Nenhum simulado foi salvo na base local para o ano de {selected_year}. "
+            "Envie um arquivo CSV na seção acima para iniciar a série temporal."
+        )
+        return
+
+    loaded_nums = {int(d.get("simulado_num", 1)) for d in datasets}
+    status_cols = st.columns(8)
+    for idx in range(1, 9):
+        with status_cols[idx - 1]:
+            if idx in loaded_nums:
+                st.success(f"**{idx}º Sim.**\n\nImportado")
+            else:
+                st.warning(f"**{idx}º Sim.**\n\nPendente")
+
+    timeline_rows = []
+    macro_rows = []
+    skill_rows = []
+
+    for item in datasets:
+        sim_num = int(item.get("simulado_num", 1))
+        sim_label = f"{sim_num}º Simulado"
+        sim_df = sanitize_dataframe_columns(pd.DataFrame(item["records"]))
+
+        skill_summary = _build_skill_summary(sim_df, simulado_num=sim_num)
+        if skill_summary.empty:
+            continue
+
+        # Prioriza as habilidades mapeadas; usa todas as numéricas apenas se nenhuma for mapeada
+        mapped = skill_summary[skill_summary["Código SAEB"] != "Não mapeado"]
+        eval_basis = mapped if not mapped.empty else skill_summary
+
+        avg_pct = round(float(eval_basis["Aproveitamento (%)"].mean()), 2)
+        std_pct = (
+            round(float(eval_basis["Aproveitamento (%)"].std()), 2)
+            if len(eval_basis) > 1
+            else 0.0
+        )
+
+        timeline_rows.append({
+            "Ordem": sim_num,
+            "Simulado": sim_label,
+            "Registros": item["row_count"],
+            "Aproveitamento Médio (%)": avg_pct,
+            "Dispersão entre Habilidades (DP)": std_pct,
+        })
+
+        # Apenas habilidades mapeadas entram nos 4 Macro-Eixos (elimina "Outros Indicadores")
+        if not mapped.empty:
+            by_macro = (
+                mapped.groupby("Macro-Eixo", as_index=False)["Aproveitamento (%)"]
+                .mean()
+            )
+            for _, m_row in by_macro.iterrows():
+                macro_rows.append({
+                    "Ordem": sim_num,
+                    "Simulado": sim_label,
+                    "Macro-Eixo": m_row["Macro-Eixo"],
+                    "Aproveitamento (%)": round(float(m_row["Aproveitamento (%)"]), 2),
+                })
+
+            for _, s_row in mapped.iterrows():
+                skill_rows.append({
+                    "Ordem": sim_num,
+                    "Simulado": sim_label,
+                    "Código SAEB": s_row["Código SAEB"],
+                    "Descrição": s_row["Descrição da Habilidade"],
+                    "Aproveitamento (%)": s_row["Aproveitamento (%)"],
+                })
+
+    if not timeline_rows:
+        st.warning("Os simulados salvos não possuem colunas numéricas avaliáveis.")
+        return
+
+    timeline_df = pd.DataFrame(timeline_rows).sort_values("Ordem")
+    timeline_df["Variação (Δ p.p.)"] = timeline_df["Aproveitamento Médio (%)"].diff().round(2)
+
+    first_sim = timeline_df.iloc[0]
+    last_sim = timeline_df.iloc[-1]
+    net_gain = round(
+        last_sim["Aproveitamento Médio (%)"] - first_sim["Aproveitamento Médio (%)"],
+        2,
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Simulados na Série", f"{len(timeline_df)} de 8")
+    c2.metric(
+        f"Linha de Base ({first_sim['Simulado']})",
+        f"{first_sim['Aproveitamento Médio (%)']:.1f}%",
+    )
+    c3.metric(
+        f"Último Aplicado ({last_sim['Simulado']})",
+        f"{last_sim['Aproveitamento Médio (%)']:.1f}%",
+        delta=f"{net_gain:+.1f} p.p. vs. base" if len(timeline_df) > 1 else None,
+    )
+    c4.metric(
+        "Média Acumulada no Ano",
+        f"{timeline_df['Aproveitamento Médio (%)'].mean():.1f}%",
+    )
+
+    fig_geral = px.line(
+        timeline_df,
+        x="Simulado",
+        y="Aproveitamento Médio (%)",
+        markers=True,
+        text="Aproveitamento Médio (%)",
+        title=f"Evolução do Aproveitamento Médio Geral — {selected_year}",
+        template="plotly_white",
+        color_discrete_sequence=["#123B66"],
+        range_y=[0, 100],
+    )
+    fig_geral.update_traces(textposition="top center", line=dict(width=3))
+    st.plotly_chart(fig_geral, use_container_width=True)
+
+    show_dataframe(
+        timeline_df[
+            [
+                "Simulado",
+                "Registros",
+                "Aproveitamento Médio (%)",
+                "Variação (Δ p.p.)",
+                "Dispersão entre Habilidades (DP)",
+            ]
+        ]
+    )
+
+    st.divider()
+
+    if macro_rows:
+        st.subheader("Evolução Contínua por Macro-Eixo Cognitivo")
+        st.caption(
+            "Consolida apenas as habilidades SAEB/BNCC mapeadas nos 4 domínios cognitivos "
+            "para manter comparabilidade contínua entre edições."
+        )
+        macro_df = pd.DataFrame(macro_rows).sort_values("Ordem")
+        fig_macro = px.line(
+            macro_df,
+            x="Simulado",
+            y="Aproveitamento (%)",
+            color="Macro-Eixo",
+            markers=True,
+            title="Desempenho por Macro-Eixo ao Longo dos Simulados",
+            template="plotly_white",
+            range_y=[0, 100],
+        )
+        fig_macro.update_traces(line=dict(width=2.5))
+        st.plotly_chart(fig_macro, use_container_width=True)
+
+    if skill_rows:
+        st.divider()
+        st.subheader("Evolução por Habilidade Específica (Pareamento SAEB)")
+        skills_temp_df = pd.DataFrame(skill_rows).sort_values("Ordem")
+
+        counts = skills_temp_df.groupby("Código SAEB")["Simulado"].nunique()
+        recorrentes = sorted(counts[counts >= 2].index.tolist())
+        todas = sorted(counts.index.tolist())
+
+        opcoes_habilidades = recorrentes if recorrentes else todas
+        selecionadas = st.multiselect(
+            "Selecione os códigos SAEB para comparar ao longo das edições",
+            options=todas,
+            default=opcoes_habilidades[:5],
+            key="temporal_saeb_codes",
+        )
+
+        if selecionadas:
+            filtered_skills = skills_temp_df[
+                skills_temp_df["Código SAEB"].isin(selecionadas)
+            ]
+            fig_saeb = px.line(
+                filtered_skills,
+                x="Simulado",
+                y="Aproveitamento (%)",
+                color="Código SAEB",
+                markers=True,
+                hover_data={"Descrição": True},
+                title="Curva de Aprendizagem por Código SAEB",
+                template="plotly_white",
+                range_y=[0, 100],
+            )
+            st.plotly_chart(fig_saeb, use_container_width=True)
+
+            pivot_saeb = (
+                filtered_skills.pivot_table(
+                    index=["Código SAEB", "Descrição"],
+                    columns="Simulado",
+                    values="Aproveitamento (%)",
+                    aggfunc="mean",
+                )
+                .reset_index()
+            )
+            show_dataframe(pivot_saeb)
+
+
+def render_skill_analysis(df: pd.DataFrame, simulado_num: int | None = None) -> None:
+    """Aba 3: Análise Pedagógica por Habilidades (SAEB / BNCC)."""
+    st.subheader("Análise Pedagógica por Habilidades (SAEB / BNCC)")
+    edicao_txt = f"{simulado_num}º Simulado SAEB" if simulado_num else "Simulados SAEB"
+    st.caption(
+        f"Matriz de referência: Língua Portuguesa — 8º Ano ({edicao_txt} — SEMEC Teresina)."
+    )
+
+    summary = _build_skill_summary(df, simulado_num=simulado_num)
     catalog_df = get_skills_catalog_df()
 
-    if numeric_columns:
-        rows = []
-        for col in numeric_columns:
-            matched = match_column_to_skill(col)
-            mean_val = float(df[col].mean())
+def render_skill_analysis(df: pd.DataFrame, simulado_num: int | None = None) -> None:
+    """Aba 3: Análise Pedagógica por Habilidades (SAEB / BNCC)."""
+    st.subheader("Análise Pedagógica por Habilidades (SAEB / BNCC)")
+    edicao_txt = f"{simulado_num}º Simulado SAEB" if simulado_num else "Simulados SAEB"
+    st.caption(
+        f"Matriz de referência: Língua Portuguesa — 8º Ano ({edicao_txt} — SEMEC Teresina)."
+    )
 
-            # Normaliza a escala para percentual (0-1 -> 0-100%; 0-10 -> 0-100%)
-            max_val = float(df[col].max()) if df[col].notna().any() else 100.0
-            if max_val <= 1.0:
-                pct_val = round(mean_val * 100, 2)
-            elif max_val <= 10.0:
-                pct_val = round(mean_val * 10, 2)
-            else:
-                pct_val = round(mean_val, 2)
+    summary = _build_skill_summary(df)
+    catalog_df = get_skills_catalog_df()
 
-            rows.append({
-                "Coluna no Arquivo": col,
-                "Código SAEB": matched["codigo_saeb"] if matched else "Não mapeado",
-                "Código BNCC": matched["codigo_bncc"] if matched else "—",
-                "Descrição da Habilidade": (
-                    matched["descricao_bncc"]
-                    if matched
-                    else "Coluna numérica sem vínculo automático com código SAEB/BNCC."
-                ),
-                "Eixo SAEB": matched["eixo_saeb"] if matched else "—",
-                "Média Bruta": round(mean_val, 2),
-                "Aproveitamento (%)": pct_val,
-                "Mediana": round(float(df[col].median()), 2),
-                "Desvio Padrão": round(float(df[col].std()), 2) if len(df) > 1 else 0.0,
-                "Registros Válidos": int(df[col].count()),
-                "Nível Pedagógico": classify_proficiency(pct_val),
-            })
-
-        summary = pd.DataFrame(rows)
+    if not summary.empty:
         mapped_count = (summary["Código SAEB"] != "Não mapeado").sum()
-
-        # Identifica o maior e o menor aproveitamento para destaque pedagógico
         best_row = summary.loc[summary["Aproveitamento (%)"].idxmax()]
         worst_row = summary.loc[summary["Aproveitamento (%)"].idxmin()]
 
@@ -263,7 +385,7 @@ def render_skill_analysis(df: pd.DataFrame) -> None:
         m2.metric("Habilidades SAEB Identificadas", mapped_count)
         m3.metric(
             "Aproveitamento Médio Geral",
-            f"{summary['Aproveitamento (%)'].mean():.1f}%"
+            f"{summary['Aproveitamento (%)'].mean():.1f}%",
         )
 
         c_best, c_worst = st.columns(2)
@@ -280,7 +402,7 @@ def render_skill_analysis(df: pd.DataFrame) -> None:
                     </span>
                 </div>
                 """,
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
 
         with c_worst:
@@ -296,7 +418,7 @@ def render_skill_analysis(df: pd.DataFrame) -> None:
                     </span>
                 </div>
                 """,
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
 
         summary["Rótulo Gráfico"] = summary.apply(
@@ -305,7 +427,7 @@ def render_skill_analysis(df: pd.DataFrame) -> None:
                 if r["Código SAEB"] != "Não mapeado"
                 else r["Coluna no Arquivo"]
             ),
-            axis=1
+            axis=1,
         )
 
         color_map = {
@@ -345,6 +467,7 @@ def render_skill_analysis(df: pd.DataFrame) -> None:
             "Coluna no Arquivo",
             "Código SAEB",
             "Código BNCC",
+            "Macro-Eixo",
             "Descrição da Habilidade",
             "Média Bruta",
             "Aproveitamento (%)",
@@ -363,58 +486,193 @@ def render_skill_analysis(df: pd.DataFrame) -> None:
 
     st.divider()
 
-    # Catálogo interativo de consulta das habilidades oficiais
     with st.expander(
-        "Catálogo Oficial de Habilidades — Língua Portuguesa (8º Ano | SAEB 2026)",
-        expanded=not bool(numeric_columns)
+        "Catálogo Oficial de Habilidades — Língua Portuguesa (8º Ano | SAEB)",
+        expanded=summary.empty,
     ):
         f1, f2 = st.columns([1, 2])
         with f1:
             bloco_filter = st.selectbox(
                 "Filtrar por Bloco do Simulado",
-                ["Todos os Blocos", "Bloco 1", "Bloco 2"],
-                key="skill_bloco_filter"
+                ["Todos os Blocos", "Bloco 1", "Bloco 2", "Bloco 3", "Bloco 4"],
+                key="skill_bloco_filter",
             )
         with f2:
             search_term = st.text_input(
                 "Buscar habilidade por código ou palavra-chave",
                 placeholder="Ex.: 9L2.1.G, EF69LP14, metáfora, reclamação, poema...",
-                key="skill_search_term"
+                key="skill_search_term",
             )
 
         filtered_catalog = catalog_df.copy()
 
-        if bloco_filter != "Todos os Blocos":
+        if bloco_filter != "Todos os Blocos" and "Bloco" in filtered_catalog.columns:
             filtered_catalog = filtered_catalog[
                 filtered_catalog["Bloco"].str.contains(bloco_filter, case=False, na=False)
             ]
 
         if search_term.strip():
             term = search_term.strip()
-            mask = (
-                filtered_catalog["Código SAEB"].str.contains(term, case=False, na=False)
-                | filtered_catalog["Código BNCC"].str.contains(term, case=False, na=False)
-                | filtered_catalog["Habilidade SAEB"].str.contains(term, case=False, na=False)
-                | filtered_catalog["Descrição BNCC"].str.contains(term, case=False, na=False)
-            )
+            mask = pd.Series(False, index=filtered_catalog.index)
+            for col in filtered_catalog.columns:
+                mask = mask | filtered_catalog[col].astype(str).str.contains(
+                    term, case=False, na=False
+                )
             filtered_catalog = filtered_catalog[mask]
 
         st.caption(f"Exibindo {len(filtered_catalog)} de {len(catalog_df)} habilidades mapeadas.")
+        show_dataframe(filtered_catalog)
 
-        catalog_display_cols = [
-            "Código SAEB",
-            "Código BNCC",
-            "Bloco",
-            "Questões Bloco 1 (Gab.)",
-            "Questões Bloco 2 (Gab.)",
-            "Habilidade SAEB",
-            "Descrição BNCC",
-        ]
-        show_dataframe(filtered_catalog[catalog_display_cols])
+
+def render_descriptive_analysis(df: pd.DataFrame, metrics: dict) -> None:
+    """Aba 4 (Parte 1): Estatísticas descritivas, histograma e diagrama de caixa."""
+    numeric = metrics.get("numeric", {})
+    numeric_columns = list(numeric.keys())
+
+    if not numeric_columns:
+        st.info("Não foram encontradas variáveis numéricas.")
+        return
+
+    st.subheader("Estatísticas descritivas")
+
+    numeric_table = pd.DataFrame(numeric).T
+    numeric_table = numeric_table.rename(
+        columns=lambda col: METRIC_LABELS_PT.get(str(col).strip().lower(), col)
+    )
+    show_dataframe(numeric_table.reset_index(names="Variável"))
+
+    selected = st.selectbox(
+        "Selecione uma variável numérica",
+        numeric_columns,
+        key="descriptive_variable",
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        fig = px.histogram(
+            df,
+            x=selected,
+            marginal="box",
+            title=f"Distribuição de {selected}",
+            labels={selected: selected, "count": "Frequência"},
+            template="plotly_white",
+            color_discrete_sequence=["#123B66"],
+        )
+        fig.update_layout(autosize=True, yaxis_title="Frequência")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        fig = px.box(
+            df,
+            y=selected,
+            title=f"Diagrama de caixa de {selected}",
+            labels={selected: selected},
+            template="plotly_white",
+            color_discrete_sequence=["#123B66"],
+        )
+        fig.update_layout(autosize=True)
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def render_categorical_analysis(df: pd.DataFrame) -> None:
+    """Aba 4 (Parte 2): Tabela de frequência e gráfico de barras para variáveis categóricas."""
+    categorical_columns = get_categorical_columns(df)
+
+    if not categorical_columns:
+        st.info("Não foram encontradas variáveis categóricas.")
+        return
+
+    selected = st.selectbox(
+        "Selecione uma variável categórica",
+        categorical_columns,
+        key="categorical_variable",
+    )
+
+    frequency = (
+        df[selected]
+        .fillna("(Ausente)")
+        .astype(str)
+        .value_counts()
+        .head(20)
+        .rename_axis("Categoria")
+        .reset_index(name="Frequência")
+    )
+
+    col1, col2 = st.columns([1, 1.5])
+
+    with col1:
+        show_dataframe(frequency)
+
+    with col2:
+        fig = px.bar(
+            frequency,
+            x="Categoria",
+            y="Frequência",
+            title=f"Frequência de {selected}",
+            template="plotly_white",
+            color_discrete_sequence=["#123B66"],
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def render_group_analysis(df: pd.DataFrame) -> None:
+    """Aba 5: Comparação de indicadores numéricos agrupados por turma, escola ou categoria."""
+    columns = get_categorical_columns(df)
+    numeric_columns = get_numeric_columns(df)
+
+    if not columns or not numeric_columns:
+        st.info(
+            "Esta análise exige pelo menos uma variável categórica "
+            "e uma variável numérica."
+        )
+        return
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        group_column = st.selectbox(
+            "Agrupar por",
+            columns,
+            key="group_column",
+        )
+
+    with c2:
+        value_column = st.selectbox(
+            "Indicador numérico",
+            numeric_columns,
+            key="group_value",
+        )
+
+    grouped = (
+        df.groupby(group_column, dropna=False)[value_column]
+        .agg(
+            Quantidade="count",
+            Média="mean",
+            Mediana="median",
+            **{"Desvio padrão": "std"},
+            Mínimo="min",
+            Máximo="max",
+        )
+        .reset_index()
+        .rename(columns={group_column: "Grupo"})
+    )
+
+    show_dataframe(grouped)
+
+    fig = px.bar(
+        grouped,
+        x="Grupo",
+        y="Média",
+        title=f"Média de {value_column} por {group_column}",
+        template="plotly_white",
+        color_discrete_sequence=["#123B66"],
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def render_quality_analysis(df: pd.DataFrame) -> None:
-    """Aba 5: Diagnóstico de integridade, tipos de dados e completude por coluna."""
+    """Aba 6: Diagnóstico de integridade, tipos de dados e completude por coluna."""
     quality = pd.DataFrame({
         "Coluna": list(df.columns),
         "Tipo de dado": [
@@ -430,7 +688,7 @@ def render_quality_analysis(df: pd.DataFrame) -> None:
         "Completude (%)": [
             round(df[col].notna().mean() * 100, 2)
             for col in df.columns
-        ]
+        ],
     })
 
     show_dataframe(quality)
@@ -442,13 +700,13 @@ def render_quality_analysis(df: pd.DataFrame) -> None:
         title="Completude por variável",
         range_y=[0, 100],
         template="plotly_white",
-        color_discrete_sequence=["#123B66"]
+        color_discrete_sequence=["#123B66"],
     )
     st.plotly_chart(fig, use_container_width=True)
 
 
 def render_report(df: pd.DataFrame, metrics: dict) -> None:
-    """Aba 6: Exportação da base tratada em CSV e das métricas traduzidas em JSON."""
+    """Aba 7: Exportação da base tratada em CSV e das métricas traduzidas em JSON."""
     st.subheader("Exportação dos resultados")
 
     clean_df = sanitize_dataframe_columns(df)
@@ -459,7 +717,7 @@ def render_report(df: pd.DataFrame, metrics: dict) -> None:
         data=csv_data,
         file_name="saip_dados_analisados.csv",
         mime="text/csv",
-        use_container_width=True
+        use_container_width=True,
     )
 
     translated_metrics = translate_metrics_dict(metrics)
@@ -467,7 +725,7 @@ def render_report(df: pd.DataFrame, metrics: dict) -> None:
         translated_metrics,
         ensure_ascii=False,
         indent=4,
-        default=str
+        default=str,
     )
 
     st.download_button(
@@ -475,5 +733,5 @@ def render_report(df: pd.DataFrame, metrics: dict) -> None:
         data=json_data.encode("utf-8"),
         file_name="saip_metricas.json",
         mime="application/json",
-        use_container_width=True
+        use_container_width=True,
     )

@@ -7,7 +7,7 @@ Contém a tela de login centralizada e o formulário de alteração de senha.
 from pathlib import Path
 import streamlit as st
 
-from src.auth import authenticate, change_password
+from src.auth import authenticate, change_password, reset_default_password
 
 
 def render_login_screen(logo_path: Path) -> None:
@@ -75,6 +75,9 @@ def render_login_screen(logo_path: Path) -> None:
                 st.rerun()
             else:
                 st.error("Usuário ou senha inválidos.")
+        if st.button("Resetar senha padrão (admin)", use_container_width=True):
+            senha_padrao = reset_default_password("admin")
+            st.info(f"Senha do usuário 'admin' restaurada para: `{senha_padrao}`")
 
 
 def render_change_password_page() -> None:
