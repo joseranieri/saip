@@ -8,10 +8,12 @@ Contém a implementação completa de todas as abas de análise do SAIP:
   4. Estatísticas Numéricas e Categóricas (render_descriptive_analysis, render_categorical_analysis)
   5. Turmas e Grupos (render_group_analysis)
   6. Qualidade dos Dados (render_quality_analysis)
-  7. Relatórios e Exportação (render_report)
+  7. Relatórios e Exportação PDF/CSV/JSON (render_report)
 """
 
 import json
+from pathlib import Path
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -32,7 +34,8 @@ from src.ui.components import (
     show_dataframe,
 )
 
-def _apply_responsive_legend(fig, bottom_margin: int = 95):
+
+def _apply_responsive_legend(fig, bottom_margin: int = 105):
     """Posiciona a legenda horizontalmente abaixo do gráfico para melhor leitura no mobile."""
     fig.update_layout(
         legend=dict(
@@ -148,11 +151,7 @@ def render_overview(df: pd.DataFrame, metrics: dict) -> None:
 
 
 def render_temporal_analysis(default_year: int = 2026) -> None:
-    """
-    Aba 2: Evolução Temporal (1º ao 8º Simulado).
-    Consolida todas as edições salvas do ano letivo e exibe cobertura,
-    variação entre edições (Δ p.p.), Macro-Eixos e códigos SAEB pareados.
-    """
+    """Aba 2: Evolução Temporal (1º ao 8º Simulado)."""
     st.subheader("Evolução Temporal dos Simulados (Ciclo Anual de 8 Avaliações)")
     st.caption(
         "Acompanhe a progressão pedagógica do 1º ao 8º Simulado por média geral, "
@@ -193,6 +192,7 @@ def render_temporal_analysis(default_year: int = 2026) -> None:
     timeline_rows = []
     macro_rows = []
     skill_rows = []
+    per_simulado_summaries = []
 
     for item in datasets:
         sim_num = int(item.get("simulado_num", 1))
@@ -221,7 +221,14 @@ def render_temporal_analysis(default_year: int = 2026) -> None:
             "Dispersão entre Habilidades (DP)": std_pct,
         })
 
-        # Apenas habilidades mapeadas entram nos 4 Macro-Eixos (elimina "Outros Indicadores")
+        per_simulado_summaries.append({
+            "simulado_num": sim_num,
+            "simulado_label": sim_label,
+            "name": item.get("name", sim_label),
+            "row_count": item.get("row_count", len(sim_df)),
+            "summary_df": skill_summary,
+        })
+
         if not mapped.empty:
             by_macro = (
                 mapped.groupby("Macro-Eixo", as_index=False)["Aproveitamento (%)"]
@@ -310,8 +317,6 @@ def render_temporal_analysis(default_year: int = 2026) -> None:
         )
         macro_df = pd.DataFrame(macro_rows).sort_values("Ordem")
 
-        # Cria grade completa (todos os simulados importados x todos os Macro-Eixos)
-        # para manter o eixo X fixo mesmo ao isolar um eixo na legenda do Plotly
         simulados_ordenados = [
             f"{num}º Simulado" for num in sorted(macro_df["Ordem"].unique())
         ]
@@ -355,15 +360,12 @@ def render_temporal_analysis(default_year: int = 2026) -> None:
         recorrentes = sorted(counts[counts >= 2].index.tolist())
         todas = sorted(counts.index.tolist())
 
-        # Mapeia cada código SAEB para sua descrição oficial
         desc_por_codigo = (
             skills_temp_df.drop_duplicates("Código SAEB")
             .set_index("Código SAEB")["Descrição"]
             .to_dict()
         )
 
-        # Opções da lista suspensa incluem código + descrição;
-        # a tag selecionada exibe apenas o código curto (ex.: 9L2.6)
         opcoes_formatadas = [
             f"{cod} — {desc_por_codigo.get(cod, '')}" for cod in todas
         ]
@@ -411,6 +413,58 @@ def render_temporal_analysis(default_year: int = 2026) -> None:
                 .reset_index()
             )
             show_dataframe(pivot_saeb)
+    st.divider()
+    st.subheader("Exportação do Relatório Geral Consolidado")
+    st.caption(
+        f"Gera um PDF único consolidando todos os {len(timeline_df)} simulados importados "
+        f"em {selected_year}, incluindo evolução geral, Macro-Eixos, pareamento SAEB e detalhamento por edição."
+    )
+
+    if st.button(
+        f"Gerar Relatório Geral Consolidado ({selected_year}) em PDF",
+        type="primary",
+        use_container_width=True,
+        key="btn_generate_temporal_general_pdf",
+    ):
+        try:
+            from src.pdf_exporter import generate_temporal_general_pdf_report
+
+            with st.spinner("Consolidando todos os simulados e renderizando gráficos..."):
+                logo_path = Path(__file__).resolve().parents[3] / "assets" / "logo.png"
+                macro_df_export = (
+                    pd.DataFrame(macro_rows).sort_values("Ordem")
+                    if macro_rows
+                    else None
+                )
+                skills_df_export = (
+                    pd.DataFrame(skill_rows).sort_values("Ordem")
+                    if skill_rows
+                    else None
+                )
+                general_pdf_bytes = generate_temporal_general_pdf_report(
+                    selected_year=selected_year,
+                    timeline_df=timeline_df,
+                    macro_df=macro_df_export,
+                    skills_temp_df=skills_df_export,
+                    per_simulado_summaries=per_simulado_summaries,
+                    logo_path=logo_path,
+                )
+                st.session_state["temporal_general_pdf_bytes"] = general_pdf_bytes
+                st.session_state["temporal_general_pdf_name"] = (
+                    f"SAIP_Relatorio_Geral_Consolidado_{selected_year}.pdf"
+                )
+        except Exception as exc:
+            st.error(f"Erro ao gerar o Relatório Geral em PDF: {exc}")
+
+    if "temporal_general_pdf_bytes" in st.session_state:
+        st.download_button(
+            f"Baixar Relatório Geral Consolidado ({selected_year}) — PDF",
+            data=st.session_state["temporal_general_pdf_bytes"],
+            file_name=st.session_state["temporal_general_pdf_name"],
+            mime="application/pdf",
+            use_container_width=True,
+            key="btn_download_temporal_general_pdf",
+        )
 
 
 def render_skill_analysis(df: pd.DataFrame, simulado_num: int | None = None) -> None:
@@ -506,8 +560,7 @@ def render_skill_analysis(df: pd.DataFrame, simulado_num: int | None = None) -> 
         fig.update_layout(
             yaxis_title="Habilidade / Indicador",
             xaxis_title="Aproveitamento Médio (%)",
-            legend_title="Classificação Pedagógica",
-            height=max(380, len(summary) * 45),
+            height=max(420, len(summary) * 45),
         )
         _apply_responsive_legend(fig, bottom_margin=100)
         st.plotly_chart(fig, use_container_width=True)
@@ -755,9 +808,111 @@ def render_quality_analysis(df: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_report(df: pd.DataFrame, metrics: dict) -> None:
-    """Aba 7: Exportação da base tratada em CSV e das métricas traduzidas em JSON."""
+def render_report(
+    df: pd.DataFrame,
+    metrics: dict,
+    dataset_name: str | None = None,
+    simulado_num: int | None = None,
+    ano_letivo: int = 2026,
+) -> None:
+    """Aba 7: Exportação segmentada em PDF com gráficos, CSV e JSON."""
     st.subheader("Exportação dos resultados")
+    st.caption(
+        "Gere o relatório pedagógico completo em PDF (com todas as análises "
+        "segmentadas, tabelas formatadas e gráficos) ou exporte os dados brutos."
+    )
+
+    nome_relatorio = (
+        dataset_name
+        or st.session_state.get("current_name")
+        or "Analise_SAIP"
+    )
+    sim_atual = simulado_num or st.session_state.get("current_simulado_num")
+    ano_atual = int(st.session_state.get("current_ano_letivo", ano_letivo))
+
+    if st.button(
+        "Gerar Relatório Completo em PDF (Segmentado com Gráficos)",
+        type="primary",
+        use_container_width=True,
+        key="btn_generate_full_pdf",
+    ):
+        try:
+            from src.pdf_exporter import generate_segmented_pdf_report
+
+            with st.spinner("Renderizando gráficos e montando o relatório PDF..."):
+                skill_summary = _build_skill_summary(df, simulado_num=sim_atual)
+
+                temporal_timeline_df = None
+                temporal_macro_df = None
+                saved_datasets = get_datasets_by_year(ano_atual)
+                if saved_datasets:
+                    t_rows = []
+                    m_rows = []
+                    for item in saved_datasets:
+                        s_num = int(item.get("simulado_num", 1))
+                        s_label = f"{s_num}º Simulado"
+                        s_df = sanitize_dataframe_columns(pd.DataFrame(item["records"]))
+                        s_sum = _build_skill_summary(s_df, simulado_num=s_num)
+                        if s_sum.empty:
+                            continue
+                        mapped = s_sum[s_sum["Código SAEB"] != "Não mapeado"]
+                        basis = mapped if not mapped.empty else s_sum
+                        t_rows.append({
+                            "Ordem": s_num,
+                            "Simulado": s_label,
+                            "Registros": item["row_count"],
+                            "Aproveitamento Médio (%)": round(float(basis["Aproveitamento (%)"].mean()), 2),
+                            "Dispersão entre Habilidades (DP)": (
+                                round(float(basis["Aproveitamento (%)"].std()), 2)
+                                if len(basis) > 1
+                                else 0.0
+                            ),
+                        })
+                        if not mapped.empty:
+                            by_m = mapped.groupby("Macro-Eixo", as_index=False)["Aproveitamento (%)"].mean()
+                            for _, mr in by_m.iterrows():
+                                m_rows.append({
+                                    "Ordem": s_num,
+                                    "Simulado": s_label,
+                                    "Macro-Eixo": mr["Macro-Eixo"],
+                                    "Aproveitamento (%)": round(float(mr["Aproveitamento (%)"]), 2),
+                                })
+                    if t_rows:
+                        temporal_timeline_df = pd.DataFrame(t_rows).sort_values("Ordem")
+                        temporal_timeline_df["Variação (Δ p.p.)"] = (
+                            temporal_timeline_df["Aproveitamento Médio (%)"].diff().round(2)
+                        )
+                    if m_rows:
+                        temporal_macro_df = pd.DataFrame(m_rows).sort_values("Ordem")
+
+                logo_path = Path(__file__).resolve().parents[3] / "assets" / "logo.png"
+                pdf_bytes = generate_segmented_pdf_report(
+                    df=df,
+                    metrics=metrics,
+                    dataset_name=nome_relatorio,
+                    skill_summary_df=skill_summary,
+                    temporal_timeline_df=temporal_timeline_df,
+                    temporal_macro_df=temporal_macro_df,
+                    logo_path=logo_path,
+                )
+                st.session_state["generated_pdf_bytes"] = pdf_bytes
+                st.session_state["generated_pdf_name"] = (
+                    f"SAIP_Relatorio_{nome_relatorio.replace(' ', '_')}.pdf"
+                )
+        except Exception as exc:
+            st.error(f"Erro ao gerar o PDF: {exc}")
+
+    if "generated_pdf_bytes" in st.session_state:
+        st.download_button(
+            "Baixar Relatório PDF Pronto",
+            data=st.session_state["generated_pdf_bytes"],
+            file_name=st.session_state["generated_pdf_name"],
+            mime="application/pdf",
+            use_container_width=True,
+            key="btn_download_full_pdf",
+        )
+
+    st.divider()
 
     clean_df = sanitize_dataframe_columns(df)
     csv_data = clean_df.to_csv(index=False).encode("utf-8-sig")
