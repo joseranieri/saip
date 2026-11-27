@@ -22,6 +22,45 @@ from src.ui.components import (
     sanitize_dataframe_columns,
 )
 
+MACRO_EIXOS_GLOSSARY_DF = pd.DataFrame([
+    {
+        "Macro-Eixo Cognitivo": "1. Compreensao e Localizacao Textual",
+        "Prefixos / Codigos SAEB": "5L1.1, 5L1.2, 9L1.2.I, 9L1.2.D, 9L1.3.G, 9L1.3.I",
+        "Dominios Cognitivos e Generos Aglomerados": (
+            "Localizacao de informacoes explicitas, identificacao da ideia central, tema global "
+            "e situacao comunicativa em textos jornalisticos, normativos, legais e reivindicatorios "
+            "(carta de reclamacao, noticia, reportagem e estatutos)."
+        ),
+    },
+    {
+        "Macro-Eixo Cognitivo": "2. Generos e Estrutura Composicional",
+        "Prefixos / Codigos SAEB": "Demais codigos 5L* e 9L* (ex.: 9L1.5.*, 9L2.1.*, 9L2.10.A)",
+        "Dominios Cognitivos e Generos Aglomerados": (
+            "Analise da organizacao estrutural, suporte e recursos grafico-espaciais ou sonoros "
+            "de diferentes generos: narrativo literario (enredo, foco narrativo, conflito, desfecho), "
+            "poemas, divulgacao cientifica, texto dramatico e midiatico."
+        ),
+    },
+    {
+        "Macro-Eixo Cognitivo": "3. Inferencia, Semantica e Senso Critico",
+        "Prefixos / Codigos SAEB": "5L2.6-5L2.8, 5L3.1, 9L2.3, 9L2.6, 9L2.7, 9L2.9, 9L1.1.C, 9L1.4",
+        "Dominios Cognitivos e Generos Aglomerados": (
+            "Deducao de informacoes implicitas, sentido de palavras/expressoes, distincao entre "
+            "fato e opiniao, reconhecimento de ironia/humor, estrategias argumentativas e persuasivas, "
+            "e comparacao de confiabilidade entre diferentes midias."
+        ),
+    },
+    {
+        "Macro-Eixo Cognitivo": "4. Analise Linguistica e Coesao",
+        "Prefixos / Codigos SAEB": "Todos os codigos 5AL* e 9AL* (ex.: 5AL1.5, 9AL1.1.*, 9AL2.*)",
+        "Dominios Cognitivos e Generos Aglomerados": (
+            "Mecanismos de referenciacao lexical e pronominal, conectivos e conjuncoes de progressao "
+            "textual, efeitos de sentido da pontuacao/modalizacao, figuras de linguagem (metafora/comparacao) "
+            "e variacao linguistica."
+        ),
+    },
+])
+
 
 def _safe_text(value: object) -> str:
     """Normaliza texto para compatibilidade segura com fontes padrão Latin-1 do PDF."""
@@ -72,6 +111,64 @@ def _fig_to_png_bytes(fig, width: int = 960, height: int = 440) -> bytes | None:
 
 class SAIPReportPDF(FPDF):
     """Template institucional do relatório pedagógico em PDF do SAIP."""
+
+    def add_macro_eixos_glossary(self, section_number: str) -> None:
+        """Renderiza ao final do PDF a tabela metodológica dos 4 Macro-Eixos Cognitivos."""
+        self.add_page()
+        self.add_section_banner(
+            section_number,
+            "Nota Metodologica: Aglomeracao dos Macro-Eixos Cognitivos",
+            "Correspondencia entre os dominios cognitivos, generos textuais e codigos SAEB (5o e 9o Ano).",
+        )
+
+        col_widths = [46.0, 44.0, 96.0]
+        headers = list(MACRO_EIXOS_GLOSSARY_DF.columns)
+
+        self.set_fill_color(43, 108, 176)
+        self.set_text_color(255, 255, 255)
+        self.set_draw_color(203, 215, 229)
+        self.set_font("Helvetica", "B", 8)
+
+        self.set_x(12)
+        for header_txt, w in zip(headers, col_widths):
+            self.cell(w, 7, _safe_text(header_txt), border=1, align="L", fill=True)
+        self.ln()
+
+        line_h = 4.6
+        for row_idx, (_, row) in enumerate(MACRO_EIXOS_GLOSSARY_DF.iterrows()):
+            texts = [_safe_text(row[col]) for col in headers]
+
+            # Calcula a altura necessária da linha conforme a coluna com mais quebras de texto
+            max_lines = 1
+            for col_i, (txt, w) in enumerate(zip(texts, col_widths)):
+                self.set_font("Helvetica", "B" if col_i == 0 else "", 7.5)
+                lines = self.multi_cell(w, line_h, txt, dry_run=True, output="LINES")
+                max_lines = max(max_lines, len(lines))
+
+            row_h = max_lines * line_h + 3.0
+            y_start = self.get_y()
+
+            if row_idx % 2 == 1:
+                self.set_fill_color(248, 250, 253)
+            else:
+                self.set_fill_color(255, 255, 255)
+
+            x_cursor = 12.0
+            for col_i, (txt, w) in enumerate(zip(texts, col_widths)):
+                self.rect(x_cursor, y_start, w, row_h, style="DF")
+                self.set_xy(x_cursor + 1.5, y_start + 1.5)
+                if col_i == 0:
+                    self.set_font("Helvetica", "B", 7.5)
+                    self.set_text_color(18, 59, 102)
+                else:
+                    self.set_font("Helvetica", "", 7.5)
+                    self.set_text_color(23, 43, 77)
+                self.multi_cell(w - 3.0, line_h, txt, border=0, align="L")
+                x_cursor += w
+
+            self.set_y(y_start + row_h)
+
+        self.ln(4)
 
     def __init__(self, dataset_name: str, logo_path: Path | None = None):
         super().__init__(orientation="P", unit="mm", format="A4")
@@ -457,6 +554,7 @@ def generate_temporal_general_pdf_report(
                 max_rows=55,
             )
 
+    pdf.add_macro_eixos_glossary("5")
     return bytes(pdf.output())
 
 
@@ -748,4 +846,5 @@ def generate_segmented_pdf_report(
     )
     pdf.add_chart_image(_fig_to_png_bytes(fig_qual, height=360))
 
+    pdf.add_macro_eixos_glossary("8")
     return bytes(pdf.output())

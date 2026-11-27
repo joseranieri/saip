@@ -40,6 +40,7 @@ st.set_page_config(
 
 BASE_DIR = Path(__file__).resolve().parent
 LOGO_PATH = BASE_DIR / "assets" / "logo.png"
+LOGOW_PATH = BASE_DIR / "assets" / "logoBranca.png"
 
 init_db()
 ensure_default_user()
